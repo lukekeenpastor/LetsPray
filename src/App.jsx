@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { ChevronLeft, ChevronRight, Heart, Plus, Trash2, Upload, X, RefreshCw, BookOpen, RotateCcw, Cake, BarChart2, Bell, Star, Lightbulb } from "lucide-react";
+import { loadMyDays, saveMyDays, addPrayerDay, computeMyStreak } from "./myStreak.js";
 
 const STORAGE_KEY = "intercede-people-v2";
 // Settings loaded from KV on startup
@@ -809,6 +810,10 @@ function AppMain({ settings }) {
     }
     return count;
   }, [weekHistory]);
+
+  // Personal streak: days in a row this phone marked someone as prayed for
+  const [myDays, setMyDays] = useState(loadMyDays);
+  const myStreak = computeMyStreak(myDays);
   const prayedCount = prayedPeople.length; // unique people prayed
   const praySessionCount = prayedPeople.reduce((sum, p) => sum + (p.weekPrayCount || 1), 0); // total sessions this week
   const upcomingBdays = getUpcomingBirthdays(activePeople);
@@ -926,6 +931,7 @@ function AppMain({ settings }) {
       return { ...p, prayedAt: Date.now(), prayedWeek: weekStart, prayedWeekDate: weekDateStr, prayCount: (p.prayCount || 0) + 1, weekPrayCount: inSameWeek ? (p.weekPrayCount || 1) + 1 : 1, updatedAt: Date.now() };
     }));
     if (current?.id) dismissBday(current.id);
+    setMyDays(prev => { const next = addPrayerDay(prev); saveMyDays(next); return next; });
     setPinnedPersonId(null);
     setKeepPrayingMode(false); // return to celebration screen after Pray Again
   }
@@ -1426,6 +1432,20 @@ function AppMain({ settings }) {
               ))}
             </div>
           )}
+          <div style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 16px", background:C.accentBg, border:`1px solid ${C.accent}44`, borderRadius:12 }}>
+            <Heart size={18} fill={myStreak.today ? C.accent : "none"} color={C.accent} style={{ flexShrink:0 }} />
+            <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+              <span style={{ fontSize:10, color:C.accent, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.08em", fontFamily:"'Inter', system-ui, sans-serif" }}>Your Streak</span>
+              <span style={{ fontSize:14, color:C.cream, fontFamily:"'Lora', Georgia, serif", lineHeight:1.3 }}>
+                {myStreak.current > 0
+                  ? `${myStreak.current} day${myStreak.current !== 1 ? "s" : ""} in a row${myStreak.today ? " — prayed today" : " — pray today to keep it going"}`
+                  : "Pray for someone today to start your streak"}
+              </span>
+              {myStreak.best > 1 && (
+                <span style={{ fontSize:11, color:C.muted, fontFamily:"'Inter', system-ui, sans-serif" }}>Best: {myStreak.best} days</span>
+              )}
+            </div>
+          </div>
 {streak > 0 && (
             <div style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 16px", background:C.accentBg, border:`1px solid ${C.accent}44`, borderRadius:12 }}>
               <svg width="18" height="18" viewBox="0 0 20 20" style={{ flexShrink:0 }}><path d="M10,2 L11.768,8.232 L18,10 L11.768,11.768 L10,18 L8.232,11.768 L2,10 L8.232,8.232 Z" fill="#6b9e78" /></svg>
