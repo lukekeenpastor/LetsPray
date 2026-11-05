@@ -1,38 +1,41 @@
+import { guard, json, kvKeys } from "../../server/access.js";
+
+const FIELDS = ["weekStart", "prevWeekStart", "prevWeekDateStr", "count", "total"];
+
 export async function onRequest(context) {
   const { request, env } = context;
+  if (request.method === "OPTIONS") return new Response(null, { status: 204 });
 
-  const headers = {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Cache-Control": "no-store, no-cache, must-revalidate",
-  };
-
-  if (request.method === "OPTIONS") return new Response(null, { headers });
-
-  if (!env.INTERCEDE_KV) {
-    return new Response(JSON.stringify({ error: "KV namespace not bound" }), { status: 500, headers });
-  }
+  const url = new URL(request.url);
+  const section = url.searchParams.get("section") || "students";
+  const g = await guard(request, env, { section });
+  if (g.error) return g.error;
+  const key = kvKeys(section).history;
 
   if (request.method === "GET") {
-    const data = await env.INTERCEDE_KV.get("week_history");
-    return new Response(data || "[]", { headers });
+    let list = [];
+    try { list = JSON.parse((await env.INTERCEDE_KV.get(key)) || "[]"); } catch (_e) { list = []; }
+    return json(Array.isArray(list) ? list : []);
   }
 
   if (request.method === "POST") {
     const body = await request.text();
+    if (body.length > 200_000) return json({ error: "Too large" }, 413);
     try {
       const parsed = JSON.parse(body);
       if (!Array.isArray(parsed)) throw new Error("not array");
-      // Store up to 52 weeks for streak tracking
-      const trimmed = parsed.slice(0, 52);
-      await env.INTERCEDE_KV.put("week_history", JSON.stringify(trimmed));
-      return new Response(JSON.stringify({ ok: true }), { headers });
+      // Keep up to 52 weeks for streak tracking, and only the fields the app uses.
+      const clean = parsed.slice(0, 52).filter(e => e && typeof e === "object").map(e => {
+        const o = {};
+        for (const f of FIELDS) if (e[f] !== undefined) o[f] = e[f];
+        return o;
+      });
+      await env.INTERCEDE_KV.put(key, JSON.stringify(clean));
+      return json({ ok: true });
     } catch (_e) {
-      return new Response(JSON.stringify({ error: "Invalid JSON" }), { status: 400, headers });
+      return json({ error: "Invalid JSON" }, 400);
     }
   }
 
-  return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405, headers });
+  return json({ error: "Method not allowed" }, 405);
 }

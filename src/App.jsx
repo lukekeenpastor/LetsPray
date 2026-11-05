@@ -31,39 +31,24 @@ function dismissBday(personId) {
 function recordTapShown() {
   try { localStorage.setItem(TAP_KEY, String(Date.now())); } catch (_e) {}
 }
-const ADMIN_KEY = "intercede-admin-authed";
-const ADMIN_TTL = 86400000;
 
-function isAdminAuthed() {
+// Which section (Students, Kids, Board, Staff) the app is showing. Set by App() before the first load.
+let API_SECTION = "students";
+const sq = () => `section=${encodeURIComponent(API_SECTION)}`;
+
+async function apiSaveSettings(settings) {
   try {
-    const raw = localStorage.getItem(ADMIN_KEY);
-    if (!raw) return false;
-    const { ts } = JSON.parse(raw);
-    return Date.now() - ts < ADMIN_TTL;
+    const res = await fetch("/api/data?key=settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(settings),
+    });
+    return res.ok;
   } catch (_e) { return false; }
 }
 
-function setAdminAuthed() {
-  localStorage.setItem(ADMIN_KEY, JSON.stringify({ ts: Date.now() }));
-}
-async function apiLoadSettings() {
-  try {
-    const res = await fetch("/api/data?key=settings");
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (_e) { return null; }
-}
-
-async function apiSaveSettings(settings) {
-  await fetch("/api/data?key=settings", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(settings),
-  });
-}
-
 async function apiLoad() {
-  const res = await fetch("/api/data");
+  const res = await fetch(`/api/data?${sq()}`, { cache: "no-store" });
   if (!res.ok) throw new Error("load failed");
   const data = await res.json();
   // Treat an empty array from KV as suspicious — never trust it over local state
@@ -73,27 +58,47 @@ async function apiLoad() {
 
 async function apiSave(people, force = false) {
   if (!people || people.length === 0) return;
-  await fetch("/api/data", {
+  await fetch(`/api/data?${sq()}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(force ? { data: people, force: true } : people),
   });
 }
 
-
-
 async function apiLoadHistory() {
-  const res = await fetch("/api/history");
+  const res = await fetch(`/api/history?${sq()}`, { cache: "no-store" });
   if (!res.ok) return [];
   return await res.json();
 }
 
 async function apiSaveHistory(history) {
-  await fetch("/api/history", {
+  await fetch(`/api/history?${sq()}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(history),
   });
+}
+
+// Minors are shown as first name + last initial everywhere (the server enforces this too).
+const NAME_SUFFIXES = new Set(["jr", "sr", "ii", "iii", "iv", "v"]);
+function maskMinorName(name) {
+  const s = String(name || "").replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  let first, last;
+  if (s.includes(",")) {
+    const [l, ...rest] = s.split(",");
+    last = l.trim();
+    first = rest.join(" ").trim().split(" ")[0] || "";
+  } else {
+    const parts = s.split(" ").filter(Boolean);
+    while (parts.length > 2 && NAME_SUFFIXES.has(parts[parts.length - 1].replace(/\./g, "").toLowerCase())) parts.pop();
+    if (parts.length === 1) return parts[0];
+    first = parts[0];
+    last = parts[parts.length - 1];
+  }
+  const m = last.match(/\p{L}/u);
+  const initial = m ? m[0].toUpperCase() : "";
+  return initial ? `${first} ${initial}.` : first;
 }
 
 function getWeekLabel(weekStartTs) {
@@ -485,18 +490,15 @@ function AllPrayedScreen({ prayedCount, praySessionCount, total, onWeek, onKeepP
 function SetupScreen({ onComplete }) {
   const [name, setName] = React.useState("");
   const [sub, setSub] = React.useState("");
-  const [pw, setPw] = React.useState("");
-  const [pw2, setPw2] = React.useState("");
   const [err, setErr] = React.useState("");
   const [saving, setSaving] = React.useState(false);
 
   async function submit() {
     if (!name.trim()) return setErr("Please enter your ministry name.");
-    if (pw.length < 6) return setErr("Password must be at least 6 characters.");
-    if (pw !== pw2) return setErr("Passwords don’t match.");
-    setSaving(true);
-    const data = { name: name.trim(), sub: sub.trim(), password: pw };
-    await apiSaveSettings(data).catch(() => {});
+    setSaving(true); setErr("");
+    const data = { name: name.trim(), sub: sub.trim() };
+    const ok = await apiSaveSettings(data);
+    if (!ok) { setSaving(false); return setErr("Couldn’t save. Try again."); }
     onComplete(data);
   }
 
@@ -511,13 +513,98 @@ function SetupScreen({ onComplete }) {
       <h1 style={{ fontFamily:"'Lora', Georgia, serif", fontSize:28, fontWeight:600, color:"#e8e0d4", margin:"0 0 6px", textAlign:"center" }}>Let’s Pray</h1>
       <p style={{ fontSize:13, color:"#7a8082", margin:"0 0 32px", textAlign:"center" }}>Admin setup — only needs to be done once</p>
       <div style={{ width:"100%", maxWidth:360, display:"flex", flexDirection:"column", gap:12 }}>
-        <div><label style={lbl}>Ministry Name</label><input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. First Baptist Students" style={inp} /></div>
-        <div><label style={lbl}>Subtitle <span style={{ opacity:0.5, fontWeight:400, textTransform:"none" }}>(optional)</span></label><input value={sub} onChange={e => setSub(e.target.value)} placeholder='e.g. "Let’s Pray"' style={inp} /></div>
-        <div><label style={lbl}>Admin Password</label><input type="password" value={pw} onChange={e => setPw(e.target.value)} placeholder="Choose a password (6+ characters)" style={inp} /></div>
-        <div><label style={lbl}>Confirm Password</label><input type="password" value={pw2} onChange={e => setPw2(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} placeholder="Re-enter password" style={inp} /></div>
+        <div><label style={lbl}>Ministry Name</label><input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Quincy Faith" style={inp} /></div>
+        <div><label style={lbl}>Subtitle <span style={{ opacity:0.5, fontWeight:400, textTransform:"none" }}>(optional)</span></label><input value={sub} onChange={e => setSub(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} placeholder='e.g. "Let’s Pray"' style={inp} /></div>
         {err && <p style={{ color:"#c07070", fontSize:13, margin:0 }}>{err}</p>}
         <button onClick={submit} disabled={saving} style={{ background:"#6b9e78", border:"none", color:"#fff", borderRadius:12, padding:"14px 0", fontSize:15, fontWeight:600, cursor:"pointer", fontFamily:"'Inter', system-ui, sans-serif", marginTop:4, opacity: saving ? 0.7 : 1 }}>{saving ? "Saving…" : "Get Started"}</button>
       </div>
+    </div>
+  );
+}
+
+function NoticeScreen({ title, children, actionLabel, onAction }) {
+  return (
+    <div style={{ minHeight:"100vh", background:"#1a1c1e", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"32px 24px", textAlign:"center" }}>
+      <svg width="40" height="40" viewBox="0 0 20 20" style={{ marginBottom:16, opacity:0.8 }}>
+        <path d="M10,2 L11.768,8.232 L18,10 L11.768,11.768 L10,18 L8.232,11.768 L2,10 L8.232,8.232 Z" fill="#6b9e78" />
+      </svg>
+      <h1 style={{ fontFamily:"'Lora', Georgia, serif", fontSize:24, fontWeight:600, color:"#e8e0d4", margin:"0 0 10px" }}>{title}</h1>
+      <div style={{ fontSize:14, color:"#a9aeb0", lineHeight:1.55, maxWidth:360, fontFamily:"'Inter', system-ui, sans-serif" }}>{children}</div>
+      {actionLabel && <button onClick={onAction} style={{ marginTop:22, background:"#6b9e78", border:"none", color:"#fff", borderRadius:12, padding:"12px 22px", fontSize:15, fontWeight:600, cursor:"pointer", fontFamily:"'Inter', system-ui, sans-serif" }}>{actionLabel}</button>}
+    </div>
+  );
+}
+
+// Admin only: who may open each section. People are added by email address.
+function AccessPanel({ me, onClose }) {
+  const [loading, setLoading] = React.useState(true);
+  const [failed, setFailed] = React.useState(false);
+  const [admins, setAdmins] = React.useState([]);
+  const [text, setText] = React.useState({});
+  const [msg, setMsg] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+
+  function toText(access) {
+    const t = {};
+    me.sections.forEach(sec => { t[sec.id] = ((access || {})[sec.id] || []).join("\n"); });
+    return t;
+  }
+
+  React.useEffect(() => {
+    let alive = true;
+    fetch("/api/access", { cache: "no-store" })
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error("no"))))
+      .then(d => { if (!alive) return; setText(toText(d.access)); setAdmins(d.admins || []); setLoading(false); })
+      .catch(() => { if (alive) { setFailed(true); setLoading(false); } });
+    return () => { alive = false; };
+  }, []);
+
+  async function save() {
+    setSaving(true); setMsg("");
+    const body = {};
+    me.sections.forEach(sec => { body[sec.id] = (text[sec.id] || "").split(/[\s,;]+/).filter(Boolean); });
+    try {
+      const r = await fetch("/api/access", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (!r.ok) throw new Error("save failed");
+      const d = await r.json();
+      setText(toText(d.access));
+      setMsg("Saved. People on each list can open that section right away.");
+    } catch (_e) { setMsg("Couldn’t save. Try again."); }
+    setSaving(false);
+  }
+
+  const box = { background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, padding:14, display:"flex", flexDirection:"column", gap:6 };
+  const label = { fontSize:12, color:C.accent, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.06em", fontFamily:"'Inter', system-ui, sans-serif" };
+  const area = { width:"100%", boxSizing:"border-box", minHeight:84, background:C.card, border:`1px solid ${C.border}`, borderRadius:10, color:C.cream, padding:"10px 12px", fontSize:14, fontFamily:"'Inter', system-ui, sans-serif", outline:"none", resize:"vertical" };
+
+  return (
+    <div style={{ padding:"16px 16px 8px", display:"flex", flexDirection:"column", gap:12 }}>
+      <div>
+        <h2 style={{ margin:0, fontFamily:"'Lora', Georgia, serif", fontSize:20, color:C.cream, fontWeight:600 }}>Who can open each section</h2>
+        <p style={{ margin:"6px 0 0", fontSize:13, color:C.muted, lineHeight:1.5, fontFamily:"'Inter', system-ui, sans-serif" }}>
+          Type one email address per line. A leader signs in with a one-time code sent to that address. Admins can open every section.
+        </p>
+      </div>
+      {loading && <p style={{ color:C.muted, fontSize:14 }}>Loading…</p>}
+      {failed && <p style={{ color:"#c07070", fontSize:14 }}>Couldn’t load the lists. Reload and try again.</p>}
+      {!loading && !failed && (
+        <>
+          {me.sections.map(sec => (
+            <div key={sec.id} style={box}>
+              <label htmlFor={`acc-${sec.id}`} style={label}>{sec.label}</label>
+              <textarea id={`acc-${sec.id}`} value={text[sec.id] || ""} onChange={e => setText(prev => ({ ...prev, [sec.id]: e.target.value }))} placeholder="name@example.com" style={area} />
+            </div>
+          ))}
+          {admins.length > 0 && (
+            <p style={{ margin:0, fontSize:12, color:C.muted, lineHeight:1.5, fontFamily:"'Inter', system-ui, sans-serif" }}>Admins: {admins.join(", ")}</p>
+          )}
+          {msg && <p style={{ margin:0, fontSize:13, color: msg.startsWith("Saved") ? C.accentLight : "#c07070", fontFamily:"'Inter', system-ui, sans-serif" }}>{msg}</p>}
+          <div style={{ display:"flex", gap:8 }}>
+            <button onClick={save} disabled={saving} style={{ ...S.confirmBtn, opacity: saving ? 0.7 : 1 }}>{saving ? "Saving…" : "Save lists"}</button>
+            <button onClick={onClose} style={S.cancelBtn}>Done</button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -547,23 +634,67 @@ class ErrorBoundary extends React.Component {
 }
 
 export default function App() {
-  const [settings, setSettings] = React.useState(null);
-  const [settingsLoaded, setSettingsLoaded] = React.useState(false);
+  const [boot, setBoot] = React.useState({ state: "loading" });
+  const [section, setSection] = React.useState(null);
 
-  React.useEffect(() => {
-    apiLoadSettings().then(s => {
-      setSettings(s || false);
-      setSettingsLoaded(true);
-    });
+  const loadMe = React.useCallback(async () => {
+    setBoot({ state: "loading" });
+    try {
+      const res = await fetch("/api/me", { cache: "no-store" });
+      let data = null;
+      try { data = await res.json(); } catch (_e) {}
+      if (res.status === 200 && data) {
+        let saved = null;
+        try { saved = localStorage.getItem("letspray-section"); } catch (_e) {}
+        const ids = data.sections.map(x => x.id);
+        setSection(ids.includes(saved) ? saved : (ids[0] || null));
+        setBoot({ state: "ok", me: data });
+      } else if (res.status === 503) {
+        setBoot({ state: "unconfigured", missing: (data && data.missing) || [] });
+      } else if (res.status === 401) {
+        setBoot({ state: "signin" });
+      } else {
+        setBoot({ state: "error" });
+      }
+    } catch (_e) { setBoot({ state: "error" }); }
   }, []);
 
-  if (!settingsLoaded) return <LoadingScreen />;
-  if (!settings) return <SetupScreen onComplete={s => setSettings(s)} />;
-  return <AppMain settings={settings} />;
+  React.useEffect(() => { loadMe(); }, [loadMe]);
+
+  function switchSection(id) {
+    try { localStorage.setItem("letspray-section", id); } catch (_e) {}
+    setSection(id);
+  }
+
+  if (boot.state === "loading") return <LoadingScreen />;
+  if (boot.state === "unconfigured") return (
+    <NoticeScreen title="Almost ready">
+      Sign-in protection hasn’t been finished yet, so this site stays closed for now.
+      {boot.missing.length > 0 && <div style={{ marginTop:10, fontSize:12, opacity:0.7 }}>Still needed: {boot.missing.join(", ")}</div>}
+    </NoticeScreen>
+  );
+  if (boot.state === "signin") return <NoticeScreen title="Please sign in" actionLabel="Try again" onAction={loadMe}>Open this page again and enter your email address when asked.</NoticeScreen>;
+  if (boot.state === "error") return <NoticeScreen title="Couldn’t load" actionLabel="Try again" onAction={loadMe}>Check your connection and try again.</NoticeScreen>;
+
+  const me = boot.me;
+  if (me.setupNeeded) return <SetupScreen onComplete={s => setBoot({ state: "ok", me: { ...me, settings: s, setupNeeded: false } })} />;
+  if (!me.settings) return <NoticeScreen title="Not set up yet">An admin needs to finish the first-time setup before anyone else can open this.</NoticeScreen>;
+  if (me.sections.length === 0 || !section) return (
+    <NoticeScreen title="You don’t have access yet" actionLabel="Check again" onAction={loadMe}>
+      You’re signed in as {me.email}. Ask an admin to add that email address, then check again.
+    </NoticeScreen>
+  );
+
+  API_SECTION = section; // must be set before the section's data loads
+  return <AppMain key={section} settings={me.settings} me={me} section={section} onSwitch={switchSection} />;
 }
 
-function AppMain({ settings }) {
-  const ADMIN_PASSWORD = settings.password;
+function AppMain({ settings, me, section, onSwitch }) {
+  const sec = me.sections.find(x => x.id === section) || me.sections[0];
+  const F = sec.features;               // which features this section uses
+  const MINORS = sec.minors;            // minors are shown as first name + last initial
+  const fixName = n => (MINORS ? maskMinorName(n) : n);
+  const hide = on => (on ? {} : { display: "none" });
   const MINISTRY_NAME = settings.name;
   const MINISTRY_SUB = settings.sub || "";
 
@@ -611,12 +742,8 @@ function AppMain({ settings }) {
   const pollTimer = useRef(null);
   const isSaving = useRef(false);
 
-  // Admin auth
-  const [adminAuthed, setAdminAuthedState] = useState(() => isAdminAuthed());
-  const [showAdminPrompt, setShowAdminPrompt] = useState(false);
-  const [adminPwInput, setAdminPwInput] = useState("");
-  const [adminPwError, setAdminPwError] = useState("");
-  const [pendingView, setPendingView] = useState(null);
+  // Admin: decided by the server from the signed-in email, never by a password typed in the browser
+  const adminAuthed = me.isAdmin;
 
 
   useEffect(() => {
@@ -960,7 +1087,7 @@ function AppMain({ settings }) {
 
   function addPerson() {
     if (!addName.trim()) return;
-    setPeople(prev => [...prev, { id: genId(), name: addName.trim(), type: addType, group: addType === "student" ? addGroup : null, grade: addType === "student" && addGrade ? Number(addGrade) : null, active: true, prayedAt: null, prayerRequests: [], birthday: addBday.trim() || "", updatedAt: Date.now() }]);
+    setPeople(prev => [...prev, { id: genId(), name: fixName(addName.trim()), type: F.groups ? addType : "member", group: F.groups && addType === "student" ? addGroup : null, grade: F.grades && addType === "student" && addGrade ? Number(addGrade) : null, active: true, prayedAt: null, prayerRequests: [], birthday: F.birthdays ? (addBday.trim() || "") : "", updatedAt: Date.now() }]);
     setAddBday("");
     setAddName("");
     setAddGrade("");
@@ -1025,7 +1152,7 @@ function AppMain({ settings }) {
 
   function saveName(id) {
     if (!nameInput.trim()) return;
-    setPeople(prev => prev.map(p => p.id === id ? { ...p, name: nameInput.trim(), updatedAt: Date.now() } : p));
+    setPeople(prev => prev.map(p => p.id === id ? { ...p, name: fixName(nameInput.trim()), updatedAt: Date.now() } : p));
     setEditNameFor(null);
     setNameInput("");
   }
@@ -1055,7 +1182,7 @@ function AppMain({ settings }) {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = ev => setImportData(parseCSV(ev.target.result));
+    reader.onload = ev => setImportData(parseCSV(ev.target.result).map(p => ({ ...p, name: fixName(p.name) })));
     reader.readAsText(file);
     e.target.value = "";
   }
@@ -1064,21 +1191,10 @@ function AppMain({ settings }) {
     const existing = new Set(people.map(p => p.name.toLowerCase()));
     const toAdd = (importData || [])
       .filter(p => !existing.has(p.name.toLowerCase()))
-      .map(p => ({ id: genId(), name: p.name, type: "student", group: null, active: true, prayedAt: null, prayerRequests: [], birthday: p.birthday || "" }));
+      .map(p => ({ id: genId(), name: p.name, type: F.groups ? "student" : "member", group: null, active: true, prayedAt: null, prayerRequests: [], birthday: F.birthdays ? (p.birthday || "") : "" }));
     setPeople(prev => [...prev, ...toAdd]);
     setImportData(null);
     setView("people");
-  }
-
-  function handleTabClick(v) {
-    if ((v === "people" || v === "import") && !adminAuthed) {
-      setPendingView(v);
-      setAdminPwInput("");
-      setAdminPwError("");
-      setShowAdminPrompt(true);
-    } else {
-      setView(v);
-    }
   }
 
   async function recalculateHistory() {
@@ -1108,18 +1224,6 @@ function AppMain({ settings }) {
     await apiSaveHistory(newHistory);
   }
 
-  function submitAdminPw() {
-    if (adminPwInput === ADMIN_PASSWORD) {
-      setAdminAuthed(true);
-      setAdminAuthedState(true);
-      setShowAdminPrompt(false);
-      if (pendingView) { setView(pendingView); setPendingView(null); }
-    } else {
-      setAdminPwError("Incorrect password.");
-      setAdminPwInput("");
-    }
-  }
-
   if (!loaded) {
     return <div style={S.root}><p style={{ color: C.cream, fontFamily: "Lora, Georgia, serif", textAlign: "center", marginTop: 80, fontSize: 20 }}>Loading…</p></div>;
   }
@@ -1136,7 +1240,7 @@ function AppMain({ settings }) {
           <svg width="16" height="16" viewBox="0 0 20 20" style={{ flexShrink:0, marginTop:2 }}><path d="M10,2 L11.768,8.232 L18,10 L11.768,11.768 L10,18 L8.232,11.768 L2,10 L8.232,8.232 Z" fill="#6b9e78" /></svg>
           <div style={{ display:"flex", flexDirection:"column", lineHeight:1 }}>
             <span style={S.logoText}>{MINISTRY_NAME}</span>
-            {MINISTRY_SUB && <span style={S.logoSub}>{MINISTRY_SUB}</span>}
+            <span style={S.logoSub}>{sec.label}{MINISTRY_SUB ? ` · ${MINISTRY_SUB}` : ""}</span>
           </div>
         </div>
         <div style={{ ...S.weekBar, cursor: "pointer" }} onClick={() => setView("week")}>
@@ -1151,6 +1255,15 @@ function AppMain({ settings }) {
         <div style={{ ...S.progressFill, width: activePeople.length ? `${Math.min(100, ((prayedCount >= activePeople.length ? praySessionCount : prayedCount) / activePeople.length) * 100)}%` : "0%" }} />
       </div>
 
+      {/* Sections */}
+      {me.sections.length > 1 && (
+        <nav style={S.tabs} aria-label="Sections">
+          {me.sections.map(x => (
+            <button key={x.id} onClick={() => onSwitch(x.id)} style={{ ...S.tab, ...(x.id === section ? S.tabActive : {}) }}>{x.label}</button>
+          ))}
+        </nav>
+      )}
+
       {/* Tabs */}
       <nav style={S.tabs}>
         {[["pray","Pray"],["week","Week"],["roster","Roster"]].map(([v, label]) => (
@@ -1161,29 +1274,6 @@ function AppMain({ settings }) {
         ))}
       </nav>
 
-      {/* Admin password modal */}
-      {showAdminPrompt && (
-        <div style={S.modalOverlay} onClick={() => setShowAdminPrompt(false)}>
-          <div style={S.modalBox} onClick={e => e.stopPropagation()}>
-            <p style={S.modalTitle}>Admin Access</p>
-            <input
-              autoFocus
-              type="password"
-              value={adminPwInput}
-              onChange={e => setAdminPwInput(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") submitAdminPw(); if (e.key === "Escape") setShowAdminPrompt(false); }}
-              placeholder="Password"
-              style={S.modalInput}
-            />
-            {adminPwError && <p style={S.modalError}>{adminPwError}</p>}
-            <div style={S.modalBtns}>
-              <button onClick={submitAdminPw} style={S.confirmBtn}>Unlock</button>
-              <button onClick={() => setShowAdminPrompt(false)} style={S.cancelBtn}>Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* ─── PRAY ─── */}
       {view === "pray" && (
         <div style={S.prayWrap}>
@@ -1193,7 +1283,7 @@ function AppMain({ settings }) {
               <button onClick={() => { setOrder("alpha"); setCardIdx(0); if (shouldShowTap()) setReady(false); }} style={{ ...S.toggleOpt, ...(order === "alpha" ? S.toggleOptOn : {}) }}>A–Z</button>
               <button onClick={() => { setOrder("oldest"); setCardIdx(0); if (shouldShowTap()) setReady(false); }} style={{ ...S.toggleOpt, ...(order === "oldest" ? S.toggleOptOn : {}) }}>Time</button>
             </div>
-            <select value={filter} onChange={e => { setFilter(e.target.value); setCardIdx(0); if (shouldShowTap()) setReady(false); }} style={S.filterSelect}>
+            <select value={filter} onChange={e => { setFilter(e.target.value); setCardIdx(0); if (shouldShowTap()) setReady(false); }} style={{ ...S.filterSelect, ...hide(F.groups) }}>
               <option value="all">Everyone</option>
               <option value="ms-students">MS Students</option>
               <option value="hs-students">HS Students</option>
@@ -1279,7 +1369,7 @@ function AppMain({ settings }) {
                       ...(cardAnim === "entering-right"? { animation: "flyInRight 0.3s cubic-bezier(.22,.68,0,1.2) forwards" } : {}),
                     }}>
                       {/* Badge row */}
-                      <div style={S.badgeRow}>
+                      <div style={{ ...S.badgeRow, ...hide(F.groups) }}>
                         <div style={{ ...S.badge, ...(current?.type === "leader" ? S.leaderBadge : S.studentBadge) }}>
                           {current?.type === "leader" ? "Leader" : "Student"}
                         </div>
@@ -1324,7 +1414,7 @@ function AppMain({ settings }) {
                       </div>
 
                       {(current?.prayerRequests || []).length > 0 && (
-                        <div style={S.reqBox}>
+                        <div style={{ ...S.reqBox, ...hide(F.requests) }}>
                           <p style={S.reqLabel}>Prayer Requests</p>
                           {current.prayerRequests.map((req, i) => (
                             <div key={i} style={S.reqItem}>
@@ -1337,7 +1427,7 @@ function AppMain({ settings }) {
                       )}
 
                       {reqFor === current?.id ? (
-                        <div style={S.reqInputRow}>
+                        <div style={{ ...S.reqInputRow, ...hide(F.requests) }}>
                           <input autoFocus value={reqText} onChange={e => setReqText(e.target.value)}
                             onKeyDown={e => { if (e.key === "Enter") addRequest(current.id); if (e.key === "Escape") setReqFor(null); }}
                             placeholder="Enter prayer request…" style={S.reqInput} />
@@ -1345,7 +1435,7 @@ function AppMain({ settings }) {
                           <button onClick={() => setReqFor(null)} style={S.reqCancelBtn}><X size={13} /></button>
                         </div>
                       ) : (
-                        <button onClick={() => setReqFor(current?.id)} style={S.addReqTrigger}>
+                        <button onClick={() => setReqFor(current?.id)} style={{ ...S.addReqTrigger, ...hide(F.requests) }}>
                           <Plus size={13} style={{ marginRight: 4 }} /> Add Request
                         </button>
                       )}
@@ -1498,7 +1588,7 @@ function AppMain({ settings }) {
                 </div>
                 <div style={{ display: "flex", gap: 4 }}>
                   {p.group && <span style={{ ...S.badgeSm, ...(p.group === "hs" ? S.hsBadgeSm : S.msBadgeSm) }}>{p.group.toUpperCase()}</span>}
-                  <span style={{ ...S.badgeSm, ...(p.type === "leader" ? S.leaderBadgeSm : S.studentBadgeSm) }}>{p.type}</span>
+                  <span style={{ ...S.badgeSm, ...(p.type === "leader" ? S.leaderBadgeSm : S.studentBadgeSm), ...hide(F.groups) }}>{p.type}</span>
                 </div>
               </div>
             ))}
@@ -1512,8 +1602,8 @@ function AppMain({ settings }) {
           {/* ── Add person form ── */}
           <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, padding:"14px", display:"flex", flexDirection:"column", gap:8, marginBottom:4 }}>
             <p style={{ margin:0, fontSize:11, color:C.muted, textTransform:"uppercase", letterSpacing:"0.06em", fontWeight:600 }}>Add Person</p>
-            <input value={addName} onChange={e => setAddName(e.target.value)} onKeyDown={e => e.key === "Enter" && addPerson()} placeholder="Full name" style={{ ...S.addInput, margin:0 }} />
-            <div style={{ display:"flex", gap:8 }}>
+            <input value={addName} onChange={e => setAddName(e.target.value)} onKeyDown={e => e.key === "Enter" && addPerson()} placeholder={MINORS ? "First name and last initial" : "Full name"} style={{ ...S.addInput, margin:0 }} />
+            <div style={{ display:"flex", gap:8, ...hide(F.groups) }}>
               <select value={addType} onChange={e => { setAddType(e.target.value); }} style={{ ...S.addTypeSelect, flex:1 }}>
                 <option value="student">Student</option>
                 <option value="leader">Leader</option>
@@ -1530,19 +1620,19 @@ function AppMain({ settings }) {
               )}
             </div>
             <div style={{ display:"flex", gap:8 }}>
-              <input value={addBday} onChange={e => setAddBday(e.target.value)} placeholder="Birthday MM-DD (optional)" style={{ ...S.addInput, flex:1, margin:0, fontSize:13 }} />
+              <input hidden={!F.birthdays} value={addBday} onChange={e => setAddBday(e.target.value)} placeholder="Birthday MM-DD (optional)" style={{ ...S.addInput, flex:1, margin:0, fontSize:13 }} />
               <button onClick={addPerson} style={{ ...S.addPersonBtn, width:44, height:44 }}><Plus size={18} /></button>
             </div>
           </div>
 
           <div style={S.statRow}>
-            {[[`${activePeople.length}`, "total"], [`${activePeople.filter(p => p.group === "hs").length}`, "HS"], [`${activePeople.filter(p => p.group === "ms").length}`, "MS"], [`${prayedCount}`, "prayed ✓"]].map(([n, l]) => (
+            {[[`${activePeople.length}`, "total"], ...(F.groups ? [[`${activePeople.filter(p => p.group === "hs").length}`, "HS"], [`${activePeople.filter(p => p.group === "ms").length}`, "MS"]] : []), [`${prayedCount}`, "prayed ✓"]].map(([n, l]) => (
               <div key={l} style={S.statChip}><span style={S.statNum}>{n}</span><span style={S.statLbl}>{l}</span></div>
             ))}
           </div>
 
           {/* Type filter */}
-          <div style={{ display:"flex", gap:16, justifyContent:"center", marginBottom:6 }}>
+          <div style={{ display:"flex", gap:16, justifyContent:"center", marginBottom:6, ...hide(F.groups) }}>
             {[["all","All"],["student","Students"],["leader","Leaders"]].map(([val, label]) => (
               <button key={val} onClick={() => setPeopleTypeFilter(val)} style={{ background:"none", border:"none", borderBottom: peopleTypeFilter === val ? `2px solid ${C.accent}` : "2px solid transparent", color: peopleTypeFilter === val ? C.cream : C.muted, fontSize:13, fontWeight: peopleTypeFilter === val ? 500 : 400, padding:"2px 0", cursor:"pointer", fontFamily:"'Inter', system-ui, sans-serif" }}>
                 {label}
@@ -1601,7 +1691,7 @@ function AppMain({ settings }) {
                       </div>
                     )}
                     <div style={S.personMeta}>
-                      <span style={{ ...S.badgeSm, ...(p.type === "leader" ? S.leaderBadgeSm : S.studentBadgeSm) }}>{p.type}</span>
+                      <span style={{ ...S.badgeSm, ...(p.type === "leader" ? S.leaderBadgeSm : S.studentBadgeSm), ...hide(F.groups) }}>{p.type}</span>
                       {p.group && <span style={{ ...S.badgeSm, ...(p.group === "hs" ? S.hsBadgeSm : S.msBadgeSm) }}>{p.group.toUpperCase()}</span>}
                       {p.type === "student" && p.grade && <span style={S.gradeBadge}>{ordinal(p.grade)} Gr</span>}
                       {withinWeek(p.prayedAt) && <span style={S.prayedSmall}>✓ prayed</span>}
@@ -1611,7 +1701,7 @@ function AppMain({ settings }) {
                   </div>
                   <div style={S.personActions}>
                     <button onClick={() => { setEditBdayFor(editBdayFor === p.id ? null : p.id); setBdayInput(p.birthday || ""); setEditNameFor(null); }}
-                      style={{ ...S.iconBtn, color: p.birthday ? C.accent : C.muted }} title="Set birthday"><Cake size={13} /></button>
+                      style={{ ...S.iconBtn, color: p.birthday ? C.accent : C.muted, ...hide(F.birthdays) }} title="Set birthday"><Cake size={13} /></button>
                     <button onClick={() => cycleGroup(p.id)} style={{ ...S.iconBtn, color: p.group === "hs" ? "#7aafc4" : p.group === "ms" ? "#8eba95" : C.muted }} title="Cycle HS/MS/none">
                       <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.02em" }}>{p.group ? p.group.toUpperCase() : "—"}</span>
                     </button>
@@ -1644,7 +1734,7 @@ function AppMain({ settings }) {
           </div>
 
           {/* End-of-year grade promotion */}
-          <div style={S.promoteSection}>
+          <div style={{ ...S.promoteSection, ...hide(F.grades) }}>
             {!confirmPromo ? (
               <button onClick={() => setConfirmPromo(true)} style={S.promoteBtn}>
                 🎓 End of Year — Promote All Grades
@@ -1695,7 +1785,7 @@ function AppMain({ settings }) {
       {view === "roster" && (
         <div style={S.importWrap}>
           {/* Group filter */}
-          <div style={{ display:"flex", gap:0, marginBottom:12, borderRadius:10, overflow:"hidden", border:`1px solid ${C.border}` }}>
+          <div style={{ display:"flex", gap:0, marginBottom:12, borderRadius:10, overflow:"hidden", border:`1px solid ${C.border}`, ...hide(F.groups) }}>
             {[["all","All"],["ms","MS"],["hs","HS"],["leader","Leaders"]].map(([val, label]) => (
               <button key={val} onClick={() => setRosterGroup(val)} style={{ flex:1, background: rosterGroup === val ? C.accent : C.surface, border:"none", color: rosterGroup === val ? "#fff" : C.muted, padding:"9px 0", fontSize:13, fontWeight: rosterGroup === val ? 600 : 400, cursor:"pointer", fontFamily:"'Inter', system-ui, sans-serif", transition:"background 0.15s" }}>
                 {label}
@@ -1885,12 +1975,12 @@ function AppMain({ settings }) {
 
         </div>
       )}
-      {/* Admin footer link */}
+      {view === "access" && adminAuthed && <AccessPanel me={me} onClose={() => setView("pray")} />}
+
+      {/* Signed-in footer */}
       <div style={S.adminFooter}>
-        {adminAuthed
-          ? <button onClick={() => { setAdminAuthedState(false); localStorage.removeItem(ADMIN_KEY); setView("pray"); }} style={S.adminLink}>lock admin</button>
-          : <button onClick={() => { setAdminPwInput(""); setAdminPwError(""); setShowAdminPrompt(true); }} style={S.adminLink}>admin</button>
-        }
+        <span style={{ fontSize:11, color:C.muted, fontFamily:"'Inter', system-ui, sans-serif" }}>{me.email}</span>
+        {adminAuthed && <button onClick={() => setView("access")} style={S.adminLink}>manage access</button>}
       </div>
     </div>
   );
